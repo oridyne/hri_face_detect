@@ -8,6 +8,7 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Transform, TransformStamped, Vector3, Quaternion, PointStamped
 from hri_face_detect.face_pose_estimation import face_pose_estimation
 from hri_face_detect.one_euro_filter import OneEuroFilter, QuatOneEuroFilter
+from hri_face_detect.msg import roi, roiList
 from hri_msgs.msg import FacialLandmarks, IdsList, NormalizedPointOfInterest2D, NormalizedRegionOfInterest2D
 import math
 from mediapipe.python.solutions.face_mesh import FaceMesh
@@ -21,6 +22,9 @@ from std_msgs.msg import Empty, Header
 import tf
 from threading import Lock
 from typing import Dict
+import os
+import sys
+sys.path.append(os.path.abspath("/home/rosbox/catkin_ws/devel/lib"))
 from yunet_detector import YuNetDetector
 
 # minimum image fraction of a face detection bounding box to trigger face mesh detection
@@ -267,6 +271,7 @@ class Face:
         self.cropped_pub = None
         self.aligned_pub = None
         self.landmarks_pub = None
+        self.all_roi = None
 
         # True once the publishers are initialised
         self.ready = False
@@ -284,27 +289,33 @@ class Face:
         if self.ready:
             return
 
-        self.roi_pub = rospy.Publisher(
-            "/humans/faces/%s/roi" % self.id,
-            NormalizedRegionOfInterest2D,
-            queue_size=1,
-        )
+        # self.roi_pub = rospy.Publisher(
+        #     "/humans/faces/%s/roi" % self.id,
+        #     NormalizedRegionOfInterest2D,
+        #     queue_size=1,
+        # )
 
-        self.cropped_pub = rospy.Publisher(
-            "/humans/faces/%s/cropped" % self.id,
-            Image,
-            queue_size=1,
-        )
+        # self.cropped_pub = rospy.Publisher(
+        #     "/humans/faces/%s/cropped" % self.id,
+        #     Image,
+        #     queue_size=1,
+        # )
 
-        self.aligned_pub = rospy.Publisher(
-            "/humans/faces/%s/aligned" % self.id,
-            Image,
-            queue_size=1,
-        )
+        # self.aligned_pub = rospy.Publisher(
+        #     "/humans/faces/%s/aligned" % self.id,
+        #     Image,
+        #     queue_size=1,
+        # )
 
-        self.landmarks_pub = rospy.Publisher(
-            "/humans/faces/%s/landmarks" % self.id,
-            FacialLandmarks,
+        # self.landmarks_pub = rospy.Publisher(
+        #     "/humans/faces/%s/landmarks" % self.id,
+        #     FacialLandmarks,
+        #     queue_size=1,
+        # )
+
+        self.all_roi = rospy.Publisher(
+            "/humans/roi",
+            roi,
             queue_size=1,
         )
 
@@ -319,10 +330,11 @@ class Face:
             )
             return
 
-        self.publish_normalized_roi(src_image, image_msg_header)
-        self.publish_facial_landmarks(src_image, image_msg_header)
-        self.publish_cropped_face(src_image, image_msg_header)
-        self.publish_aligned_face(src_image, image_msg_header)
+        # self.publish_normalized_roi(src_image, image_msg_header)
+        # self.publish_facial_landmarks(src_image, image_msg_header)
+        # self.publish_cropped_face(src_image, image_msg_header)
+        # self.publish_aligned_face(src_image, image_msg_header)
+        self.publish_all_roi(src_image, image_msg_header)
 
     def publish_normalized_roi(self, src_image, image_msg_header):
 
@@ -335,6 +347,18 @@ class Face:
             self.bb.xmin + self.bb.width, self.bb.ymin + self.bb.height, img_width, img_height)
         msg.c = self.score
         self.roi_pub.publish(msg)
+
+    def publish_all_roi(self, src_image, image_msg_header):
+        img_height, img_width, _ = src_image.shape
+        msg = roi()
+        msg.header = image_msg_header
+        msg.xmin, msg.ymin = pixel_to_normalized_coordinates(
+            self.bb.xmin, self.bb.ymin, img_width, img_height)
+        msg.xmax, msg.ymax = pixel_to_normalized_coordinates(
+            self.bb.xmin + self.bb.width, self.bb.ymin + self.bb.height, img_width, img_height)
+        msg.c = self.score
+        msg.id = self.id
+        self.all_roi.publish(msg)
 
     def publish_facial_landmarks(self, src_image, image_msg_header):
 
@@ -516,15 +540,14 @@ class Face:
             try:
                 point_trans_vec = self.tl.transformPoint(self.filtering_frame,
                                                          point_trans_vec)
-                trans_vec[0] = point_trans_vec.point.x * 1000
-                trans_vec[1] = point_trans_vec.point.y * 1000
-                trans_vec[2] = point_trans_vec.point.z * 1000
+            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+                rospy.logerr("An error occured while"+\
+                             "transforming from frame %s to frame %s"\
+                             % (camera_optical_frame, self.filtering_frame))
 
-            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
-                rospy.logwarn("Unable to transform from frame %s to filtering " \
-                        "frame %s (not the same tree?). Leaving the point in " \
-                        "its original frame. Original error was: %s" \
-                        % (camera_optical_frame, self.filtering_frame, e))
+            trans_vec[0] = point_trans_vec.point.x * 1000
+            trans_vec[1] = point_trans_vec.point.y * 1000
+            trans_vec[2] = point_trans_vec.point.z * 1000
 
         current_time = rospy.Time.now().to_sec()
 
@@ -626,9 +649,10 @@ class Face:
             % (self, (rospy.Time.now() - self.initial_detection_time).to_sec())
         )
 
-        self.roi_pub.unregister()
-        self.cropped_pub.unregister()
-        self.aligned_pub.unregister()
+        # self.roi_pub.unregister()
+        self.all_roi.unregister()
+        # self.cropped_pub.unregister()
+        # self.aligned_pub.unregister()
 
         self.ready = False
 
@@ -746,15 +770,15 @@ class RosFaceDetector:
 
         processing_rate = rospy.get_param("~processing_rate", 30)
         confidence_threshold = rospy.get_param("~confidence_threshold", 0.75)
-        image_scale = rospy.get_param("~image_scale", 0.5)
-        face_mesh = rospy.get_param("~face_mesh", True)
+        image_scale = rospy.get_param("~image_scale", 0.3)
+        face_mesh = rospy.get_param("~face_mesh", False)
 
         self.filtering_frame = rospy.get_param("~filtering_frame", "camera_color_optical_frame")
         self.deterministic_ids = rospy.get_param("~deterministic_ids", False)
         self.debug = rospy.get_param("~debug", False)
 
-        rospy.loginfo("filtering frame: %s. Before filtering the face position, "\
-                    "the raw estimation will be transformed into this frame."\
+        rospy.loginfo("filtering frame: %s. Before filtering the face position,\
+                    the raw estimation will be transformed into this frame."\
                     % self.filtering_frame)
 
         self.image = None
@@ -773,6 +797,7 @@ class RosFaceDetector:
         self.detection_proc_duration = 0
 
         self.is_shutting_down = False
+        self.filtering_frame_to_validate = True
 
         self.tl = tf.TransformListener()
         self.tb = tf.TransformBroadcaster()
@@ -784,6 +809,7 @@ class RosFaceDetector:
             "/hri_face_detect/ready", Empty, queue_size=1, latch=True
         )
         self.faces_pub = rospy.Publisher("/humans/faces/tracked", IdsList, queue_size=1)
+        self.faces_roi_pub = rospy.Publisher("/humans/faces/roi", roiList, queue_size=1)
 
         self.image_sub = rospy.Subscriber("image", Image, self.image_callback, queue_size=1)
         self.image_info_sub = rospy.Subscriber(
@@ -862,6 +888,18 @@ class RosFaceDetector:
             image = deepcopy(self.image)
             image_msg_header = deepcopy(self.image_msg_header)
             self.new_image = False
+        
+        if self.filtering_frame_to_validate and self.filtering_frame:
+            self.filtering_frame_to_validate = False
+            try: 
+                self.tl.lookupTransform(self.filtering_frame,
+                                        image_msg_header.frame_id,
+                                        rospy.Time(0.0))
+            except tf.LookupException:
+                rospy.logerr("The filtering_frame does not seem to belong to the same tree"+\
+                              "of the camera optical frame. Filtering will be perfomed using the "+\
+                              "camera optical frame: %s" % image_msg_header.frame_id)
+                self.filtering_frame = None
 
         self.detection_start_proc_time = rospy.Time.now()
 
@@ -951,6 +989,20 @@ class RosFaceDetector:
                 [face.id for face in self.knownFaces.values() if face.ready],
             )
         )
+        msg_list = roiList()
+        for face in self.knownFaces.values():
+            if face.ready:
+                msg = roi()
+                msg.header = image_msg_header
+                msg.id = face.id
+                msg.xmin = face.bb.xmin
+                msg.xmax = face.bb.xmin + face.bb.width
+                msg.ymin = face.bb.ymin
+                msg.ymax = face.bb.ymin + face.bb.height
+                msg.c = face.score
+                msg_list.roiList.append(msg)
+                
+        self.faces_roi_pub.publish(msg_list)
 
         if self.debug:
             # Draw the face detection annotations on the image.
@@ -1004,6 +1056,7 @@ class RosFaceDetector:
         h = Header()
         h.stamp = rospy.Time.now()
         self.faces_pub.publish(IdsList(h, []))
+        self.faces_roi_pub.publish(roiList([]))
 
         rospy.loginfo("Stopped publishing faces.")
 
